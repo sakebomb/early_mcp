@@ -4,109 +4,21 @@ Exposes the EARLY (Timeular v4) API as MCP tools for AI-powered
 time tracking, activity management, and API exploration.
 """
 
-import os
-from datetime import datetime, timezone
+from collections import defaultdict
 from typing import Any
 
-import httpx
 from mcp.server.fastmcp import FastMCP
 
+from early_client import (
+    make_early_request,
+    now_iso,
+    date_range_for_period,
+    fetch_entries,
+    parse_iso,
+    entry_hours,
+)
+
 mcp = FastMCP("early")
-
-# Config from environment
-EARLY_API_KEY = os.environ.get("EARLY_API_KEY", "")
-EARLY_API_SECRET = os.environ.get("EARLY_API_SECRET", "")
-EARLY_BASE_URL = os.environ.get("EARLY_BASE_URL", "https://api.early.app/api/v4")
-
-# Module-level auth token cache
-_auth_token: str | None = None
-
-
-async def _ensure_auth() -> str:
-    """Authenticate with EARLY API via developer sign-in and return a token.
-
-    Caches the token at module level. Re-authenticates if no token is cached.
-    """
-    global _auth_token
-    if _auth_token:
-        return _auth_token
-
-    if not EARLY_API_KEY or not EARLY_API_SECRET:
-        raise ValueError(
-            "EARLY_API_KEY and EARLY_API_SECRET must be set as environment variables"
-        )
-
-    async with httpx.AsyncClient() as client:
-        response = await client.post(
-            f"{EARLY_BASE_URL}/developer/sign-in",
-            json={"apiKey": EARLY_API_KEY, "apiSecret": EARLY_API_SECRET},
-            timeout=30.0,
-        )
-        response.raise_for_status()
-        data = response.json()
-
-    token = data.get("token") or data.get("accessToken")
-    if not token:
-        raise ValueError(f"No token in auth response. Keys returned: {list(data.keys())}")
-
-    _auth_token = token
-    return _auth_token
-
-
-async def make_early_request(
-    method: str,
-    path: str,
-    json_body: dict[str, Any] | None = None,
-    params: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Make an authenticated request to the EARLY API.
-
-    Automatically re-authenticates once on 401 (expired token).
-    Returns error dicts (not None) so the AI always gets readable output.
-    """
-    global _auth_token
-
-    for attempt in range(2):
-        try:
-            token = await _ensure_auth()
-        except Exception as e:
-            return {"error": f"Authentication failed: {e}"}
-
-        headers = {"Authorization": f"Bearer {token}"}
-        url = f"{EARLY_BASE_URL}{path}" if path.startswith("/") else f"{EARLY_BASE_URL}/{path}"
-
-        try:
-            async with httpx.AsyncClient() as client:
-                response = await client.request(
-                    method,
-                    url,
-                    headers=headers,
-                    json=json_body,
-                    params=params,
-                    timeout=30.0,
-                )
-
-                if response.status_code == 401 and attempt == 0:
-                    _auth_token = None  # Force re-auth on next attempt
-                    continue
-
-                if response.status_code == 204:
-                    return {"success": True, "status": 204}
-
-                response.raise_for_status()
-                return response.json()
-
-        except httpx.HTTPStatusError as e:
-            body = e.response.text
-            return {
-                "error": f"HTTP {e.response.status_code}",
-                "detail": body[:500],
-                "path": path,
-            }
-        except Exception as e:
-            return {"error": str(e), "path": path}
-
-    return {"error": "Request failed after retry", "path": path}
 
 
 # --- Activity Tools ---
@@ -164,11 +76,6 @@ async def delete_activity(activity_id: str) -> dict[str, Any]:
 # --- Tracking Tools ---
 
 
-def _now_iso() -> str:
-    """Return current UTC time in EARLY's expected ISO format."""
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000")
-
-
 @mcp.tool()
 async def current_tracking() -> dict[str, Any]:
     """Get the currently running tracking entry, if any.
@@ -187,7 +94,7 @@ async def start_tracking(activity_id: str, note: str | None = None) -> dict[str,
         activity_id: ID of the activity to track (use list_activities to find IDs)
         note: Optional note/description for this tracking session
     """
-    body: dict[str, Any] = {"startedAt": _now_iso()}
+    body: dict[str, Any] = {"startedAt": now_iso()}
     if note:
         body["note"] = {"text": note, "tags": [], "mentions": []}
     return await make_early_request("POST", f"/tracking/{activity_id}/start", json_body=body)
@@ -199,7 +106,7 @@ async def stop_tracking() -> dict[str, Any]:
 
     Returns the completed time entry with start/stop times and duration.
     """
-    return await make_early_request("POST", "/tracking/stop", json_body={"stoppedAt": _now_iso()})
+    return await make_early_request("POST", "/tracking/stop", json_body={"stoppedAt": now_iso()})
 
 
 # --- Time Entry Tools ---
@@ -251,6 +158,151 @@ async def delete_time_entry(entry_id: str) -> dict[str, Any]:
         entry_id: ID of the time entry to delete
     """
     return await make_early_request("DELETE", f"/time-entries/{entry_id}")
+
+
+# --- Analysis Tools ---
+
+
+@mcp.tool()
+async def time_summary(period: str = "today") -> dict[str, Any]:
+    """Aggregate hours by activity for a time period.
+
+    Args:
+        period: One of "today", "yesterday", "week", "last_week", "month", "last_month"
+    """
+    try:
+        start_date, end_date = date_range_for_period(period)
+    except ValueError as e:
+        return {"error": str(e)}
+
+    entries = await fetch_entries(start_date, end_date)
+    if not entries:
+        return {"period": period, "start_date": start_date, "end_date": end_date, "total_hours": 0, "activities": [], "entry_count": 0}
+
+    by_activity: dict[str, dict[str, Any]] = defaultdict(lambda: {"hours": 0.0, "entries": 0})
+    total = 0.0
+
+    for entry in entries:
+        name = entry.get("activity", {}).get("name", "Unknown")
+        hours = entry_hours(entry)
+        by_activity[name]["hours"] += hours
+        by_activity[name]["entries"] += 1
+        total += hours
+
+    activities = [
+        {"name": name, "hours": round(data["hours"], 2), "entries": data["entries"], "percent": round(data["hours"] / total * 100, 1) if total else 0}
+        for name, data in sorted(by_activity.items(), key=lambda x: x[1]["hours"], reverse=True)
+    ]
+
+    return {
+        "period": period,
+        "start_date": start_date,
+        "end_date": end_date,
+        "total_hours": round(total, 2),
+        "entry_count": len(entries),
+        "activities": activities,
+    }
+
+
+@mcp.tool()
+async def efficiency_report(start_date: str, end_date: str) -> dict[str, Any]:
+    """Analyze time distribution and detect gaps between entries.
+
+    Shows how time was spent, identifies untracked gaps, and provides
+    daily breakdowns. Useful for finding productivity patterns.
+
+    Args:
+        start_date: Start date in YYYY-MM-DD format
+        end_date: End date in YYYY-MM-DD format
+    """
+    entries = await fetch_entries(start_date, end_date)
+    if not entries:
+        return {"start_date": start_date, "end_date": end_date, "total_hours": 0, "tracked_days": 0, "gaps": [], "daily_breakdown": []}
+
+    # Sort entries by start time
+    sorted_entries = sorted(entries, key=lambda e: e["duration"]["startedAt"])
+
+    total = 0.0
+    by_day: dict[str, float] = defaultdict(float)
+    gaps = []
+
+    for i, entry in enumerate(sorted_entries):
+        hours = entry_hours(entry)
+        total += hours
+        day = entry["duration"]["startedAt"][:10]
+        by_day[day] += hours
+
+        # Detect gaps > 15 minutes between consecutive entries
+        if i > 0:
+            prev_stop = parse_iso(sorted_entries[i - 1]["duration"]["stoppedAt"])
+            curr_start = parse_iso(entry["duration"]["startedAt"])
+            gap_minutes = (curr_start - prev_stop).total_seconds() / 60
+            if gap_minutes > 15:
+                gaps.append({
+                    "after": sorted_entries[i - 1].get("activity", {}).get("name", "Unknown"),
+                    "before": entry.get("activity", {}).get("name", "Unknown"),
+                    "gap_start": sorted_entries[i - 1]["duration"]["stoppedAt"],
+                    "gap_end": entry["duration"]["startedAt"],
+                    "gap_minutes": round(gap_minutes, 1),
+                })
+
+    daily_breakdown = [
+        {"date": day, "hours": round(hours, 2)}
+        for day, hours in sorted(by_day.items())
+    ]
+
+    tracked_days = len(by_day)
+    avg_per_day = round(total / tracked_days, 2) if tracked_days else 0
+
+    return {
+        "start_date": start_date,
+        "end_date": end_date,
+        "total_hours": round(total, 2),
+        "tracked_days": tracked_days,
+        "avg_hours_per_day": avg_per_day,
+        "entry_count": len(entries),
+        "gap_count": len(gaps),
+        "gaps": gaps[:20],  # Cap at 20 to avoid huge responses
+        "daily_breakdown": daily_breakdown,
+    }
+
+
+@mcp.tool()
+async def billing_report(start_date: str, end_date: str, hourly_rate: float) -> dict[str, Any]:
+    """Calculate billable hours and cost by activity.
+
+    Args:
+        start_date: Start date in YYYY-MM-DD format
+        end_date: End date in YYYY-MM-DD format
+        hourly_rate: Rate per hour in your currency
+    """
+    entries = await fetch_entries(start_date, end_date)
+    if not entries:
+        return {"start_date": start_date, "end_date": end_date, "hourly_rate": hourly_rate, "total_hours": 0, "total_cost": 0, "activities": []}
+
+    by_activity: dict[str, float] = defaultdict(float)
+    total = 0.0
+
+    for entry in entries:
+        name = entry.get("activity", {}).get("name", "Unknown")
+        hours = entry_hours(entry)
+        by_activity[name] += hours
+        total += hours
+
+    activities = [
+        {"name": name, "hours": round(hours, 2), "cost": round(hours * hourly_rate, 2)}
+        for name, hours in sorted(by_activity.items(), key=lambda x: x[1], reverse=True)
+    ]
+
+    return {
+        "start_date": start_date,
+        "end_date": end_date,
+        "hourly_rate": hourly_rate,
+        "total_hours": round(total, 2),
+        "total_cost": round(total * hourly_rate, 2),
+        "entry_count": len(entries),
+        "activities": activities,
+    }
 
 
 # --- API Explorer ---
