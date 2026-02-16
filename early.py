@@ -5,6 +5,7 @@ time tracking, activity management, and API exploration.
 """
 
 import os
+from datetime import datetime, timezone
 from typing import Any
 
 import httpx
@@ -158,6 +159,98 @@ async def delete_activity(activity_id: str) -> dict[str, Any]:
         activity_id: ID of the activity to archive
     """
     return await make_early_request("DELETE", f"/activities/{activity_id}")
+
+
+# --- Tracking Tools ---
+
+
+def _now_iso() -> str:
+    """Return current UTC time in EARLY's expected ISO format."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000")
+
+
+@mcp.tool()
+async def current_tracking() -> dict[str, Any]:
+    """Get the currently running tracking entry, if any.
+
+    Returns the active timer with activity info and start time,
+    or an error with "does not exist" if nothing is tracking.
+    """
+    return await make_early_request("GET", "/tracking")
+
+
+@mcp.tool()
+async def start_tracking(activity_id: str, note: str | None = None) -> dict[str, Any]:
+    """Start tracking time for an activity.
+
+    Args:
+        activity_id: ID of the activity to track (use list_activities to find IDs)
+        note: Optional note/description for this tracking session
+    """
+    body: dict[str, Any] = {"startedAt": _now_iso()}
+    if note:
+        body["note"] = {"text": note, "tags": [], "mentions": []}
+    return await make_early_request("POST", f"/tracking/{activity_id}/start", json_body=body)
+
+
+@mcp.tool()
+async def stop_tracking() -> dict[str, Any]:
+    """Stop the currently running tracker.
+
+    Returns the completed time entry with start/stop times and duration.
+    """
+    return await make_early_request("POST", "/tracking/stop", json_body={"stoppedAt": _now_iso()})
+
+
+# --- Time Entry Tools ---
+
+
+@mcp.tool()
+async def list_time_entries(start_date: str, end_date: str) -> dict[str, Any]:
+    """Query time entries within a date range.
+
+    Args:
+        start_date: Start date in YYYY-MM-DD format (e.g. "2026-02-01")
+        end_date: End date in YYYY-MM-DD format (e.g. "2026-02-16")
+    """
+    start_iso = f"{start_date}T00:00:00.000"
+    end_iso = f"{end_date}T23:59:59.999"
+    return await make_early_request("GET", f"/time-entries/{start_iso}/{end_iso}")
+
+
+@mcp.tool()
+async def create_time_entry(
+    activity_id: str,
+    started_at: str,
+    stopped_at: str,
+    note: str | None = None,
+) -> dict[str, Any]:
+    """Create a manual time entry.
+
+    Args:
+        activity_id: ID of the activity
+        started_at: Start time in ISO format (e.g. "2026-02-16T09:00:00.000")
+        stopped_at: Stop time in ISO format (e.g. "2026-02-16T10:30:00.000")
+        note: Optional note/description for this entry
+    """
+    body: dict[str, Any] = {
+        "activityId": activity_id,
+        "startedAt": started_at,
+        "stoppedAt": stopped_at,
+    }
+    if note:
+        body["note"] = {"text": note, "tags": [], "mentions": []}
+    return await make_early_request("POST", "/time-entries", json_body=body)
+
+
+@mcp.tool()
+async def delete_time_entry(entry_id: str) -> dict[str, Any]:
+    """Delete a time entry.
+
+    Args:
+        entry_id: ID of the time entry to delete
+    """
+    return await make_early_request("DELETE", f"/time-entries/{entry_id}")
 
 
 # --- API Explorer ---
