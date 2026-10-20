@@ -3,6 +3,7 @@ name = "early"
 version = "0.1.0"
 description = "EARLY time tracking MCP server"
 readme = "README.md"
+license = "MIT"
 requires-python = ">=3.12"
 dependencies = [
     "httpx>=0.28.1",
