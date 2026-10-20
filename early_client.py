@@ -1,9 +1,9 @@
 """EARLY API client — auth, request helpers, and utilities."""
 
 import os
-from datetime import datetime, date, timedelta, timezone, tzinfo
+from datetime import datetime, date, time, timedelta, timezone, tzinfo
 from typing import Any
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 
@@ -109,9 +109,17 @@ def now_iso() -> str:
 
 
 def local_tz() -> tzinfo | None:
-    """Timezone that dates are interpreted in: EARLY_TIMEZONE, else None (system local)."""
+    """Timezone that dates are interpreted in: EARLY_TIMEZONE, else None (system local).
+
+    Raises ValueError for an unknown zone so tools can report it like bad input.
+    """
     name = os.environ.get("EARLY_TIMEZONE")
-    return ZoneInfo(name) if name else None
+    if not name:
+        return None
+    try:
+        return ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError) as e:
+        raise ValueError(f"Unknown EARLY_TIMEZONE {name!r}; use an IANA name like America/New_York") from e
 
 
 def format_api_ts(dt: datetime) -> str:
@@ -132,7 +140,8 @@ def local_to_utc(local: datetime) -> datetime:
 
 def utc_to_local(ts: str) -> datetime:
     """Convert an EARLY API (UTC) timestamp to an aware local datetime."""
-    utc = parse_iso(ts).replace(tzinfo=timezone.utc)
+    dt = parse_iso(ts)
+    utc = dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
     tz = local_tz()
     return utc.astimezone(tz) if tz else utc.astimezone()
 
@@ -148,9 +157,12 @@ def to_api_ts(ts: str) -> str:
 
 
 def utc_range(start_date: str, end_date: str) -> tuple[str, str]:
-    """Convert inclusive local dates (YYYY-MM-DD) to EARLY API range bounds in UTC."""
-    start = local_to_utc(datetime.fromisoformat(start_date))
-    end = local_to_utc(datetime.fromisoformat(end_date) + timedelta(days=1))
+    """Convert inclusive local dates (YYYY-MM-DD) to EARLY API range bounds in UTC.
+
+    Raises ValueError for anything that is not a plain date.
+    """
+    start = local_to_utc(datetime.combine(date.fromisoformat(start_date), time()))
+    end = local_to_utc(datetime.combine(date.fromisoformat(end_date) + timedelta(days=1), time()))
     return format_api_ts(start), format_api_ts(end - timedelta(milliseconds=1))
 
 
@@ -199,7 +211,10 @@ async def fetch_entries(
     Returns (entries, None) on success or ([], error_dict) on failure, so callers
     can tell an empty range apart from a failed request.
     """
-    start_iso, end_iso = utc_range(start_date, end_date)
+    try:
+        start_iso, end_iso = utc_range(start_date, end_date)
+    except ValueError as e:
+        return [], {"error": f"Invalid date range: {e}"}
     result = await make_early_request("GET", f"/time-entries/{start_iso}/{end_iso}")
     if "error" in result:
         return [], result

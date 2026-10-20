@@ -126,7 +126,10 @@ async def list_time_entries(start_date: str, end_date: str) -> dict[str, Any]:
         start_date: Start date in YYYY-MM-DD format (e.g. "2026-02-01")
         end_date: End date in YYYY-MM-DD format, inclusive (e.g. "2026-02-16")
     """
-    start_iso, end_iso = utc_range(start_date, end_date)
+    try:
+        start_iso, end_iso = utc_range(start_date, end_date)
+    except ValueError as e:
+        return {"error": f"Invalid date range: {e}"}
     return await make_early_request("GET", f"/time-entries/{start_iso}/{end_iso}")
 
 

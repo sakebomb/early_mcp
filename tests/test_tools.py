@@ -83,6 +83,39 @@ async def test_create_time_entry_rejects_bad_timestamp_without_calling_api(api, 
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda: early.list_time_entries("2026-02-01", "2026-02-01"),
+        lambda: early.time_summary("week"),
+        lambda: early.efficiency_report("2026-02-01", "2026-02-02"),
+        lambda: early.create_time_entry("7", "2026-02-16T09:00:00", "2026-02-16T10:00:00"),
+    ],
+    ids=["list_time_entries", "time_summary", "efficiency_report", "create_time_entry"],
+)
+async def test_unknown_timezone_returns_error_not_exception(api, monkeypatch, call):
+    monkeypatch.setenv("EARLY_TIMEZONE", "America/NewYork")
+    result = await call()
+    assert "EARLY_TIMEZONE" in result["error"]
+    assert api.calls == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda: early.list_time_entries("Feb 1", "2026-02-02"),
+        lambda: early.billing_report("2026-02-01", "2026-02-02T10:00", 50.0),
+    ],
+    ids=["free_text_date", "timestamp_as_date"],
+)
+async def test_malformed_dates_return_error_not_exception(api, new_york, call):
+    result = await call()
+    assert result["error"].startswith("Invalid date range")
+    assert api.calls == []
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize("method", ["DELETE", "post", "PATCH"])
 async def test_explore_api_blocks_writes_by_default(api, monkeypatch, method):
     monkeypatch.delenv("EARLY_EXPLORE_ALLOW_WRITES", raising=False)
