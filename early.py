@@ -7,6 +7,7 @@ time tracking, activity management, and API exploration.
 import os
 from collections import defaultdict
 from typing import Any
+from urllib.parse import quote
 
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
@@ -33,8 +34,14 @@ UPDATE = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHi
 # entries that a new or stopped entry overlaps, so those writes count too.
 DESTRUCTIVE = ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False, openWorldHint=True)
 
+
 def _note(text: str) -> dict[str, Any]:
     return {"text": text, "tags": [], "mentions": []}
+
+
+def _seg(value: str) -> str:
+    """Escape an ID for use as a single URL path segment."""
+    return quote(value, safe="")
 
 
 # --- Account Tools ---
@@ -70,14 +77,17 @@ async def list_activities() -> dict[str, Any]:
 
 
 @mcp.tool(annotations=ADDITIVE)
-async def create_activity(name: str, color: str = "#4CAF50") -> dict[str, Any]:
+async def create_activity(name: str, folder_id: str, color: str = "#4CAF50") -> dict[str, Any]:
     """Create a new activity in EARLY.
 
     Args:
         name: Name of the activity (e.g. "Deep Work", "Meetings")
+        folder_id: Folder to create it in (EARLY requires one); use a folderId from list_activities
         color: Hex color code for the activity (default: green)
     """
-    return await make_early_request("POST", "/activities", json_body={"name": name, "color": color})
+    return await make_early_request(
+        "POST", "/activities", json_body={"name": name, "color": color, "folderId": folder_id}
+    )
 
 
 @mcp.tool(annotations=UPDATE)
@@ -96,7 +106,7 @@ async def update_activity(activity_id: str, name: str | None = None, color: str 
         body["color"] = color
     if not body:
         return {"error": "No fields to update. Provide name and/or color."}
-    return await make_early_request("PATCH", f"/activities/{activity_id}", json_body=body)
+    return await make_early_request("PATCH", f"/activities/{_seg(activity_id)}", json_body=body)
 
 
 @mcp.tool(annotations=UPDATE)
@@ -106,7 +116,7 @@ async def delete_activity(activity_id: str) -> dict[str, Any]:
     Args:
         activity_id: ID of the activity to archive
     """
-    return await make_early_request("DELETE", f"/activities/{activity_id}")
+    return await make_early_request("DELETE", f"/activities/{_seg(activity_id)}")
 
 
 @mcp.tool(annotations=UPDATE)
@@ -116,7 +126,7 @@ async def unarchive_activity(activity_id: str) -> dict[str, Any]:
     Args:
         activity_id: ID of the archived activity
     """
-    return await make_early_request("POST", f"/activities/{activity_id}/unarchive")
+    return await make_early_request("POST", f"/activities/{_seg(activity_id)}/unarchive")
 
 
 # --- Tracking Tools ---
@@ -132,6 +142,8 @@ async def current_tracking() -> dict[str, Any]:
     return await make_early_request("GET", "/tracking")
 
 
+# Not destructive: EARLY rejects a start while a timer runs (409) rather than
+# stopping the running one into an entry (verified live).
 @mcp.tool(annotations=ADDITIVE)
 async def start_tracking(activity_id: str, note: str | None = None) -> dict[str, Any]:
     """Start tracking time for an activity.
@@ -143,7 +155,7 @@ async def start_tracking(activity_id: str, note: str | None = None) -> dict[str,
     body: dict[str, Any] = {"startedAt": now_iso()}
     if note:
         body["note"] = _note(note)
-    return await make_early_request("POST", f"/tracking/{activity_id}/start", json_body=body)
+    return await make_early_request("POST", f"/tracking/{_seg(activity_id)}/start", json_body=body)
 
 
 @mcp.tool(annotations=UPDATE)
@@ -168,7 +180,9 @@ async def edit_tracking(
         except ValueError as e:
             return {"error": f"Invalid timestamp: {e}"}
     if note is not None:
-        body["note"] = {"text": note or None}
+        # Tags/mentions follow the markers in "text". An empty text clears the
+        # note; a null note object is silently ignored (verified live).
+        body["note"] = {"text": note}
     if not body:
         return {"error": "No fields to update. Provide activity_id, started_at and/or note."}
     return await make_early_request("PATCH", "/tracking", json_body=body)
@@ -218,7 +232,7 @@ async def get_time_entry(entry_id: str) -> dict[str, Any]:
     Args:
         entry_id: ID of the time entry
     """
-    return await make_early_request("GET", f"/time-entries/{entry_id}")
+    return await make_early_request("GET", f"/time-entries/{_seg(entry_id)}")
 
 
 @mcp.tool(annotations=DESTRUCTIVE)
@@ -281,10 +295,11 @@ async def edit_time_entry(
     except ValueError as e:
         return {"error": f"Invalid timestamp: {e}"}
     if note is not None:
-        body["note"] = {"text": note} if note else None
+        # Same shape as edit_tracking: empty text clears, a null note is ignored.
+        body["note"] = {"text": note}
     if not body:
         return {"error": "No fields to update. Provide activity_id, started_at, stopped_at and/or note."}
-    return await make_early_request("PATCH", f"/time-entries/{entry_id}", json_body=body)
+    return await make_early_request("PATCH", f"/time-entries/{_seg(entry_id)}", json_body=body)
 
 
 @mcp.tool(annotations=DESTRUCTIVE)
@@ -294,7 +309,7 @@ async def delete_time_entry(entry_id: str) -> dict[str, Any]:
     Args:
         entry_id: ID of the time entry to delete
     """
-    return await make_early_request("DELETE", f"/time-entries/{entry_id}")
+    return await make_early_request("DELETE", f"/time-entries/{_seg(entry_id)}")
 
 
 # --- Analysis Tools ---
