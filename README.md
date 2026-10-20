@@ -17,7 +17,7 @@ An MCP (Model Context Protocol) server that integrates with the [EARLY](https://
 | `get_me` | Show the authenticated user's profile |
 | `list_tags_and_mentions` | List tags and mentions (IDs used in notes) |
 | `list_activities` | List active, inactive and archived activities |
-| `create_activity` | Create a new activity |
+| `create_activity` | Create a new activity in a folder (folder ID required) |
 | `update_activity` | Update an existing activity's name or color |
 | `delete_activity` | Archive an activity (entries are kept) |
 | `unarchive_activity` | Restore an archived activity |
