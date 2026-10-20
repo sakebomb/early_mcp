@@ -1,8 +1,9 @@
 """EARLY API client — auth, request helpers, and utilities."""
 
 import os
-from datetime import datetime, date, timedelta, timezone
+from datetime import datetime, date, time, timedelta, timezone, tzinfo
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 
@@ -10,6 +11,9 @@ import httpx
 EARLY_API_KEY = os.environ.get("EARLY_API_KEY", "")
 EARLY_API_SECRET = os.environ.get("EARLY_API_SECRET", "")
 EARLY_BASE_URL = os.environ.get("EARLY_BASE_URL", "https://api.early.app/api/v4")
+
+# EARLY API timestamps are UTC with no offset suffix, millisecond precision.
+API_TS_FORMAT = "%Y-%m-%dT%H:%M:%S.%f"
 
 # Module-level auth token cache
 _auth_token: str | None = None
@@ -104,12 +108,75 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000")
 
 
-def date_range_for_period(period: str) -> tuple[str, str]:
-    """Convert a period name to (start_date, end_date) in YYYY-MM-DD format.
+def local_tz() -> tzinfo | None:
+    """Timezone that dates are interpreted in: EARLY_TIMEZONE, else None (system local).
+
+    Raises ValueError for an unknown zone so tools can report it like bad input.
+    """
+    name = os.environ.get("EARLY_TIMEZONE")
+    if not name:
+        return None
+    try:
+        return ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError) as e:
+        raise ValueError(f"Unknown EARLY_TIMEZONE {name!r}; use an IANA name like America/New_York") from e
+
+
+def format_api_ts(dt: datetime) -> str:
+    """Format an aware datetime as an EARLY API (UTC) timestamp."""
+    return dt.astimezone(timezone.utc).strftime(API_TS_FORMAT)[:-3]
+
+
+def local_to_utc(local: datetime) -> datetime:
+    """Interpret a naive local datetime in local_tz() and return it in UTC.
+
+    With no EARLY_TIMEZONE, naive astimezone() applies the system zone's rules
+    for that specific date, so DST is handled per day.
+    """
+    tz = local_tz()
+    aware = local.replace(tzinfo=tz) if tz else local.astimezone()
+    return aware.astimezone(timezone.utc)
+
+
+def utc_to_local(ts: str) -> datetime:
+    """Convert an EARLY API (UTC) timestamp to an aware local datetime."""
+    dt = parse_iso(ts)
+    utc = dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    tz = local_tz()
+    return utc.astimezone(tz) if tz else utc.astimezone()
+
+
+def to_api_ts(ts: str) -> str:
+    """Normalize a user-supplied ISO timestamp to an EARLY API timestamp.
+
+    A timestamp with an offset (or "Z") is converted from that offset; a naive
+    one is taken as local time.
+    """
+    dt = datetime.fromisoformat(ts)
+    return format_api_ts(dt if dt.tzinfo else local_to_utc(dt))
+
+
+def utc_range(start_date: str, end_date: str) -> tuple[str, str]:
+    """Convert inclusive local dates (YYYY-MM-DD) to EARLY API range bounds in UTC.
+
+    Raises ValueError for anything that is not a plain date.
+    """
+    start = local_to_utc(datetime.combine(date.fromisoformat(start_date), time()))
+    end = local_to_utc(datetime.combine(date.fromisoformat(end_date) + timedelta(days=1), time()))
+    return format_api_ts(start), format_api_ts(end - timedelta(milliseconds=1))
+
+
+def today_local() -> date:
+    """Today's date in local_tz()."""
+    return datetime.now(local_tz()).date()
+
+
+def date_range_for_period(period: str, today: date | None = None) -> tuple[str, str]:
+    """Convert a period name to local (start_date, end_date) in YYYY-MM-DD format.
 
     Supported periods: "today", "yesterday", "week" (current), "last_week", "month" (current), "last_month".
     """
-    today = date.today()
+    today = today or today_local()
 
     if period == "today":
         return str(today), str(today)
@@ -136,14 +203,22 @@ def date_range_for_period(period: str) -> tuple[str, str]:
         raise ValueError(f"Unknown period: {period}. Use: today, yesterday, week, last_week, month, last_month")
 
 
-async def fetch_entries(start_date: str, end_date: str) -> list[dict[str, Any]]:
-    """Fetch time entries for a date range. Returns the list or empty on error."""
-    start_iso = f"{start_date}T00:00:00.000"
-    end_iso = f"{end_date}T23:59:59.999"
+async def fetch_entries(
+    start_date: str, end_date: str
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+    """Fetch time entries for an inclusive local date range.
+
+    Returns (entries, None) on success or ([], error_dict) on failure, so callers
+    can tell an empty range apart from a failed request.
+    """
+    try:
+        start_iso, end_iso = utc_range(start_date, end_date)
+    except ValueError as e:
+        return [], {"error": f"Invalid date range: {e}"}
     result = await make_early_request("GET", f"/time-entries/{start_iso}/{end_iso}")
     if "error" in result:
-        return []
-    return result.get("timeEntries", [])
+        return [], result
+    return result.get("timeEntries", []), None
 
 
 def parse_iso(ts: str) -> datetime:
