@@ -4,6 +4,7 @@ Exposes the EARLY (Timeular v4) API as MCP tools for AI-powered
 time tracking, activity management, and API exploration.
 """
 
+import os
 from collections import defaultdict
 from typing import Any
 
@@ -16,6 +17,9 @@ from early_client import (
     fetch_entries,
     parse_iso,
     entry_hours,
+    to_api_ts,
+    utc_range,
+    utc_to_local,
 )
 
 mcp = FastMCP("early")
@@ -116,12 +120,13 @@ async def stop_tracking() -> dict[str, Any]:
 async def list_time_entries(start_date: str, end_date: str) -> dict[str, Any]:
     """Query time entries within a date range.
 
+    Dates are local (EARLY_TIMEZONE or the system zone); returned timestamps are UTC.
+
     Args:
         start_date: Start date in YYYY-MM-DD format (e.g. "2026-02-01")
-        end_date: End date in YYYY-MM-DD format (e.g. "2026-02-16")
+        end_date: End date in YYYY-MM-DD format, inclusive (e.g. "2026-02-16")
     """
-    start_iso = f"{start_date}T00:00:00.000"
-    end_iso = f"{end_date}T23:59:59.999"
+    start_iso, end_iso = utc_range(start_date, end_date)
     return await make_early_request("GET", f"/time-entries/{start_iso}/{end_iso}")
 
 
@@ -136,15 +141,18 @@ async def create_time_entry(
 
     Args:
         activity_id: ID of the activity
-        started_at: Start time in ISO format (e.g. "2026-02-16T09:00:00.000")
-        stopped_at: Stop time in ISO format (e.g. "2026-02-16T10:30:00.000")
+        started_at: Start time in ISO format; local time unless it has an offset (e.g. "2026-02-16T09:00:00")
+        stopped_at: Stop time in ISO format; local time unless it has an offset (e.g. "2026-02-16T10:30:00")
         note: Optional note/description for this entry
     """
-    body: dict[str, Any] = {
-        "activityId": activity_id,
-        "startedAt": started_at,
-        "stoppedAt": stopped_at,
-    }
+    try:
+        body: dict[str, Any] = {
+            "activityId": activity_id,
+            "startedAt": to_api_ts(started_at),
+            "stoppedAt": to_api_ts(stopped_at),
+        }
+    except ValueError as e:
+        return {"error": f"Invalid timestamp: {e}"}
     if note:
         body["note"] = {"text": note, "tags": [], "mentions": []}
     return await make_early_request("POST", "/time-entries", json_body=body)
@@ -175,7 +183,9 @@ async def time_summary(period: str = "today") -> dict[str, Any]:
     except ValueError as e:
         return {"error": str(e)}
 
-    entries = await fetch_entries(start_date, end_date)
+    entries, error = await fetch_entries(start_date, end_date)
+    if error:
+        return error
     if not entries:
         return {"period": period, "start_date": start_date, "end_date": end_date, "total_hours": 0, "activities": [], "entry_count": 0}
 
@@ -215,7 +225,9 @@ async def efficiency_report(start_date: str, end_date: str) -> dict[str, Any]:
         start_date: Start date in YYYY-MM-DD format
         end_date: End date in YYYY-MM-DD format
     """
-    entries = await fetch_entries(start_date, end_date)
+    entries, error = await fetch_entries(start_date, end_date)
+    if error:
+        return error
     if not entries:
         return {"start_date": start_date, "end_date": end_date, "total_hours": 0, "tracked_days": 0, "gaps": [], "daily_breakdown": []}
 
@@ -229,7 +241,7 @@ async def efficiency_report(start_date: str, end_date: str) -> dict[str, Any]:
     for i, entry in enumerate(sorted_entries):
         hours = entry_hours(entry)
         total += hours
-        day = entry["duration"]["startedAt"][:10]
+        day = utc_to_local(entry["duration"]["startedAt"]).date().isoformat()
         by_day[day] += hours
 
         # Detect gaps > 15 minutes between consecutive entries
@@ -241,8 +253,8 @@ async def efficiency_report(start_date: str, end_date: str) -> dict[str, Any]:
                 gaps.append({
                     "after": sorted_entries[i - 1].get("activity", {}).get("name", "Unknown"),
                     "before": entry.get("activity", {}).get("name", "Unknown"),
-                    "gap_start": sorted_entries[i - 1]["duration"]["stoppedAt"],
-                    "gap_end": entry["duration"]["startedAt"],
+                    "gap_start": utc_to_local(sorted_entries[i - 1]["duration"]["stoppedAt"]).isoformat(),
+                    "gap_end": utc_to_local(entry["duration"]["startedAt"]).isoformat(),
                     "gap_minutes": round(gap_minutes, 1),
                 })
 
@@ -276,7 +288,9 @@ async def billing_report(start_date: str, end_date: str, hourly_rate: float) -> 
         end_date: End date in YYYY-MM-DD format
         hourly_rate: Rate per hour in your currency
     """
-    entries = await fetch_entries(start_date, end_date)
+    entries, error = await fetch_entries(start_date, end_date)
+    if error:
+        return error
     if not entries:
         return {"start_date": start_date, "end_date": end_date, "hourly_rate": hourly_rate, "total_hours": 0, "total_cost": 0, "activities": []}
 
@@ -318,14 +332,19 @@ async def explore_api(
     """Make a raw authenticated request to any EARLY API endpoint.
 
     Use this to probe undocumented or newly discovered endpoints.
-    The base URL is already set — just provide the path.
+    The base URL is already set — just provide the path. Only GET is allowed
+    unless the server runs with EARLY_EXPLORE_ALLOW_WRITES=1; use the dedicated
+    tools to change data.
 
     Args:
-        method: HTTP method (GET, POST, PATCH, DELETE, PUT)
-        path: API path (e.g. "/tracking", "/time-entries/2024-01-01/2024-01-31")
+        method: HTTP method (GET; POST, PATCH, PUT, DELETE only when writes are enabled)
+        path: API path (e.g. "/tracking", "/time-entries/2024-01-01T05:00:00.000/2024-02-01T04:59:59.999")
         body: JSON request body (optional)
         params: Query parameters (optional)
     """
+    method = method.upper()
+    if method != "GET" and os.environ.get("EARLY_EXPLORE_ALLOW_WRITES") != "1":
+        return {"error": f"{method} is disabled in explore_api; set EARLY_EXPLORE_ALLOW_WRITES=1 to allow writes"}
     return await make_early_request(method, path, json_body=body, params=params)
 
 

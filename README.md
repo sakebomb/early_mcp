@@ -27,7 +27,7 @@ An MCP (Model Context Protocol) server that integrates with the [EARLY](https://
 | `time_summary` | Aggregate hours by activity for a period |
 | `efficiency_report` | Analyze time distribution and detect untracked gaps |
 | `billing_report` | Calculate billable hours and cost by activity |
-| `explore_api` | Make raw authenticated requests to any EARLY API endpoint |
+| `explore_api` | Make raw authenticated GET requests to any EARLY API endpoint (writes opt-in) |
 
 ## Setup
 
@@ -54,6 +54,17 @@ EARLY_API_KEY=your_api_key
 EARLY_API_SECRET=your_api_secret
 ```
 
+Optional settings:
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `EARLY_TIMEZONE` | system timezone | IANA zone (e.g. `America/New_York`) that dates and naive timestamps are read in |
+| `EARLY_EXPLORE_ALLOW_WRITES` | unset | Set to `1` to let `explore_api` send POST/PATCH/PUT/DELETE |
+
+### Dates and timezones
+
+The EARLY API stores timestamps in UTC without an offset. Tools take dates (`YYYY-MM-DD`) and naive timestamps as local time in `EARLY_TIMEZONE` and convert them to UTC, so a "day" means your local day. Timestamps with an explicit offset (`+01:00`, `Z`) are converted from that offset. Raw entries returned by `list_time_entries` keep EARLY's UTC timestamps; report tools group by local day.
+
 ### Claude Code
 
 Add this to your Claude Code MCP settings (`~/.claude/settings.json`):
@@ -78,6 +89,7 @@ Add this to your Claude Code MCP settings (`~/.claude/settings.json`):
 ```
 early.py          # MCP server with tool definitions
 early_client.py   # API client, auth, and utility functions
+tests/            # pytest suite (mocked HTTP; run with `uv run pytest`)
 pyproject.toml    # Project config and dependencies
 ```
 
