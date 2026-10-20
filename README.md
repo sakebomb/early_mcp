@@ -79,7 +79,7 @@ The EARLY API stores timestamps in UTC without an offset. Tools take dates (`YYY
 
 ### Stopping a timer
 
-EARLY rejects a stop less than one minute after the start and discards the timer along with it, so `stop_tracking` checks the timer's age first and leaves a younger one running. With `round_minutes`, both ends of the entry are snapped to the nearest step after the stop. Rounding never reorders times, so entries that did not overlap still do not.
+EARLY rejects a stop less than one minute after the start and discards the timer along with it, so `stop_tracking` checks the timer's age first and leaves a younger one running. With `round_minutes`, both ends of the entry are snapped to the nearest step (on the UTC grid) after the stop. A neighbouring entry off that grid, for example one made in the app, would then overlap and EARLY would split or remove it, so the rounded span is clamped to its neighbours, and it keeps its exact times if under a minute would remain.
 
 ### Command line
 

@@ -4,7 +4,7 @@ import pytest
 
 import early
 import early_client
-from early_client import local_day_hours, round_to_minutes, rounded_span
+from early_client import clamp_span, local_day_hours, round_to_minutes, rounded_span
 
 
 def _entry(name, started, stopped, note="", folder="1"):
@@ -75,13 +75,31 @@ def clock(monkeypatch):
 
 @pytest.mark.anyio
 async def test_stop_tracking_rounds_entry_to_quarter_hours(api, clock):
-    api.responses = [RUNNING, STOPPED, {"id": "7"}]
+    api.responses = [RUNNING, STOPPED, {"timeEntries": [STOPPED]}, {"id": "7"}]
     await early.stop_tracking(round_minutes=15)
-    assert api.calls[2] == (
+    assert api.calls[3] == (
         "PATCH",
         "/time-entries/7",
         {"startedAt": "2026-10-20T13:00:00.000", "stoppedAt": "2026-10-20T15:00:00.000"},
     )
+
+
+@pytest.mark.anyio
+async def test_stop_tracking_rounding_never_overlaps_an_off_grid_neighbour(api, clock):
+    # The previous entry (made in the app) ends at 13:04; rounding the start to 13:00
+    # would overlap it and EARLY would split it, so the start stays at 13:04.
+    before = {**_entry("Meeting", "2026-10-20T12:30:00.000", "2026-10-20T13:04:00.000"), "id": "6"}
+    api.responses = [RUNNING, STOPPED, {"timeEntries": [before, STOPPED]}, {"id": "7"}]
+    await early.stop_tracking(round_minutes=15)
+    assert api.calls[3][2] == {"startedAt": "2026-10-20T13:04:00.000", "stoppedAt": "2026-10-20T15:00:00.000"}
+
+
+def test_clamp_span_keeps_exact_times_when_under_a_minute_remains():
+    exact = (datetime(2026, 10, 20, 13, 7), datetime(2026, 10, 20, 13, 9))
+    rounded = (datetime(2026, 10, 20, 13, 0), datetime(2026, 10, 20, 13, 15))
+    others = [(datetime(2026, 10, 20, 12, 0), datetime(2026, 10, 20, 13, 7)),
+              (datetime(2026, 10, 20, 13, 9), datetime(2026, 10, 20, 14, 0))]
+    assert clamp_span(*rounded, exact, others) == (datetime(2026, 10, 20, 13, 7), datetime(2026, 10, 20, 13, 9))
 
 
 @pytest.mark.anyio
@@ -103,7 +121,7 @@ async def test_stop_tracking_leaves_timer_under_a_minute_running(api, clock):
 @pytest.mark.anyio
 async def test_stop_tracking_reports_failed_rounding_with_stopped_entry(api, clock):
     stopped = STOPPED
-    api.responses = [RUNNING, stopped, {"error": "HTTP 400"}]
+    api.responses = [RUNNING, stopped, {"timeEntries": [stopped]}, {"error": "HTTP 400"}]
     result = await early.stop_tracking(round_minutes=15)
     assert result["error"] == "HTTP 400"
     assert result["stopped_entry"] == stopped
@@ -130,6 +148,15 @@ async def test_timesheet_sums_rows_per_day_then_rounds(api, new_york):
         {"row": "Developing: roadmap#355", "days": {"2026-10-20": 0.25}, "total": 0.25},
     ]
     assert result["total_hours"] == 1.25
+
+
+@pytest.mark.anyio
+async def test_timesheet_skips_rows_that_round_to_nothing(api, new_york):
+    api.responses = [{"timeEntries": [
+        _entry("Developing", "2026-10-20T13:00:00.000", "2026-10-20T13:05:00.000", "roadmap#355"),
+    ]}]
+    result = await early.timesheet("2026-10-17", "2026-10-30", folder_id="1")
+    assert result["rows"] == []
 
 
 @pytest.mark.anyio

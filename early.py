@@ -6,7 +6,7 @@ time tracking, activity management, and API exploration.
 
 import os
 from collections import defaultdict
-from datetime import timezone
+from datetime import timedelta, timezone
 from typing import Any
 from urllib.parse import quote
 
@@ -17,6 +17,7 @@ from early_client import (
     make_early_request,
     now_iso,
     date_range_for_period,
+    clamp_span,
     fetch_entries,
     format_api_ts,
     local_day_hours,
@@ -207,24 +208,52 @@ async def stop_tracking(round_minutes: int = 0) -> dict[str, Any]:
     """
     if round_minutes < 0 or (round_minutes and 60 % round_minutes):
         return {"error": "round_minutes must be 0 or divide 60 (e.g. 5, 15, 30)"}
-    # EARLY answers a stop under one minute with 400 and also discards the
-    # timer (verified live), so check the age first and leave it running.
     tracking = await make_early_request("GET", "/tracking")
     if "error" in tracking:
         return tracking
+    return await stop_running(tracking, round_minutes)
+
+
+async def stop_running(tracking: dict[str, Any], round_minutes: int) -> dict[str, Any]:
+    """Stop the timer described by `tracking` (from GET /tracking), optionally rounding the entry."""
+    # EARLY answers a stop under one minute with 400 and also discards the
+    # timer (verified live), so check the age first and leave it running.
     stopped_at = now_iso()
     if (parse_iso(stopped_at) - parse_iso(tracking["startedAt"])).total_seconds() < 60:
         return {"error": "Tracker is under 1 minute old; EARLY would discard it. Left running.", "tracking": tracking}
     entry = await make_early_request("POST", "/tracking/stop", json_body={"stoppedAt": stopped_at})
     if "error" in entry or not round_minutes:
         return entry
-    d = entry["duration"]
-    start, stop = rounded_span(parse_iso(d["startedAt"]), parse_iso(d["stoppedAt"]), round_minutes)
-    body = {"startedAt": format_api_ts(start.replace(tzinfo=timezone.utc)), "stoppedAt": format_api_ts(stop.replace(tzinfo=timezone.utc))}
-    rounded = await make_early_request("PATCH", f"/time-entries/{_seg(str(entry['id']))}", json_body=body)
+    rounded = await _round_entry(entry, round_minutes)
     if "error" in rounded:
         return {**rounded, "stopped_entry": entry, "note": "stopped, but rounding failed; entry kept exact times"}
     return rounded
+
+
+async def _round_entry(entry: dict[str, Any], round_minutes: int) -> dict[str, Any]:
+    """Round a stopped entry, clamped so it never overlaps a neighbouring entry.
+
+    EARLY splits or removes entries that an edited one overlaps, and a neighbour
+    made in the app or stopped without rounding is off the grid.
+    """
+    exact = (parse_iso(entry["duration"]["startedAt"]), parse_iso(entry["duration"]["stoppedAt"]))
+    start, stop = rounded_span(*exact, round_minutes)
+    window = (min(start, exact[0]) - timedelta(hours=1), max(stop, exact[1]) + timedelta(hours=1))
+    nearby = await make_early_request(
+        "GET", f"/time-entries/{format_api_ts(window[0].replace(tzinfo=timezone.utc))}/{format_api_ts(window[1].replace(tzinfo=timezone.utc))}"
+    )
+    if "error" in nearby:
+        return nearby
+    others = [
+        (parse_iso(e["duration"]["startedAt"]), parse_iso(e["duration"]["stoppedAt"]))
+        for e in nearby.get("timeEntries", [])
+        if str(e.get("id")) != str(entry["id"])
+    ]
+    start, stop = clamp_span(start, stop, exact, others)
+    if (start, stop) == exact:
+        return entry
+    body = {"startedAt": format_api_ts(start.replace(tzinfo=timezone.utc)), "stoppedAt": format_api_ts(stop.replace(tzinfo=timezone.utc))}
+    return await make_early_request("PATCH", f"/time-entries/{_seg(str(entry['id']))}", json_body=body)
 
 
 @mcp.tool(annotations=DESTRUCTIVE)
@@ -519,7 +548,7 @@ async def timesheet(
     cells: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
     for entry in entries:
         activity = entry.get("activity", {})
-        if folder_id and activity.get("folderId") != folder_id:
+        if folder_id and str(activity.get("folderId")) != str(folder_id):
             continue
         note = (entry.get("note") or {}).get("text") or ""
         row = f"{activity.get('name', 'Unknown')}: {note}" if note else activity.get("name", "Unknown")
@@ -532,8 +561,9 @@ async def timesheet(
 
     rows = []
     for row, days in sorted(cells.items()):
-        rounded = {day: _round(h) for day, h in sorted(days.items()) if _round(h)}
-        rows.append({"row": row, "days": rounded, "total": round(sum(rounded.values()), 2)})
+        rounded = {day: r for day, h in sorted(days.items()) if (r := _round(h))}
+        if rounded:
+            rows.append({"row": row, "days": rounded, "total": round(sum(rounded.values()), 2)})
     return {
         "start_date": start_date,
         "end_date": end_date,

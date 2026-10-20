@@ -227,10 +227,10 @@ def parse_iso(ts: str) -> datetime:
 
 
 def round_to_minutes(dt: datetime, minutes: int) -> datetime:
-    """Round a datetime to the nearest multiple of `minutes` past the hour (halves round up).
+    """Round a datetime to the nearest multiple of `minutes` past the UTC hour (halves round up).
 
-    Rounding is monotonic, so entries that did not overlap still do not after
-    their start and stop are both rounded.
+    Rounding is monotonic, so two entries rounded to the same grid that did not
+    overlap still do not. A neighbour off the grid can; see clamp_span.
     """
     step = timedelta(minutes=minutes)
     floor = dt.replace(minute=0, second=0, microsecond=0)
@@ -244,6 +244,26 @@ def rounded_span(start: datetime, stop: datetime, minutes: int) -> tuple[datetim
     if rstop <= rstart:
         rstop = rstart + timedelta(minutes=minutes)
     return rstart, rstop
+
+
+def clamp_span(
+    start: datetime,
+    stop: datetime,
+    exact: tuple[datetime, datetime],
+    others: list[tuple[datetime, datetime]],
+) -> tuple[datetime, datetime]:
+    """Shrink a rounded span so it overlaps none of `others`; keep `exact` if under a minute remains.
+
+    A neighbour that began before the exact start limits the start; any other limits the stop.
+    """
+    for o_start, o_stop in others:
+        if o_stop <= start or o_start >= stop:
+            continue
+        if o_start < exact[0]:
+            start = max(start, o_stop)
+        else:
+            stop = min(stop, o_start)
+    return (start, stop) if stop - start >= timedelta(minutes=1) else exact
 
 
 def local_day_hours(entry: dict[str, Any]) -> dict[date, float]:

@@ -19,11 +19,14 @@ async def stop(round_minutes: int, folder_id: str | None) -> dict[str, Any]:
     """Stop the running timer, but only when its activity is in folder_id (if given)."""
     tracking = await early.current_tracking()
     if "error" in tracking:
-        return {"stopped": False, "reason": "nothing tracking"}
-    folder = tracking.get("activity", {}).get("folderId")
-    if folder_id and folder != folder_id:
+        if "does not exist" in tracking.get("detail", ""):
+            return {"stopped": False, "reason": "nothing tracking"}
+        return tracking  # auth, network or config trouble must not look like an idle timer
+    folder = str(tracking.get("activity", {}).get("folderId"))
+    if folder_id and folder != str(folder_id):
         return {"stopped": False, "reason": f"running activity is in folder {folder}, not {folder_id}"}
-    return await early.stop_tracking(round_minutes=round_minutes)
+    # Stop the timer that passed the folder check, not whatever runs by the time of a second lookup.
+    return await early.stop_running(tracking, round_minutes)
 
 
 def main(argv: list[str] | None = None) -> int:
