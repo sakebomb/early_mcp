@@ -6,6 +6,7 @@ time tracking, activity management, and API exploration.
 
 import os
 from collections import defaultdict
+from datetime import timedelta, timezone
 from typing import Any
 from urllib.parse import quote
 
@@ -16,9 +17,13 @@ from early_client import (
     make_early_request,
     now_iso,
     date_range_for_period,
+    clamp_span,
     fetch_entries,
+    format_api_ts,
+    local_day_hours,
     parse_iso,
     entry_hours,
+    rounded_span,
     to_api_ts,
     utc_range,
     utc_to_local,
@@ -189,14 +194,66 @@ async def edit_tracking(
 
 
 @mcp.tool(annotations=DESTRUCTIVE)
-async def stop_tracking() -> dict[str, Any]:
+async def stop_tracking(round_minutes: int = 0) -> dict[str, Any]:
     """Stop the currently running tracker.
 
     Returns the completed time entry with start/stop times and duration. The
     entry must be at least 1 minute long; EARLY splits or removes existing
     entries it overlaps.
+
+    Args:
+        round_minutes: Snap the entry's start and stop to the nearest multiple of
+            this many minutes (e.g. 15); 0 keeps exact times. A span that rounds
+            to nothing keeps one step.
     """
-    return await make_early_request("POST", "/tracking/stop", json_body={"stoppedAt": now_iso()})
+    if round_minutes < 0 or (round_minutes and 60 % round_minutes):
+        return {"error": "round_minutes must be 0 or divide 60 (e.g. 5, 15, 30)"}
+    tracking = await make_early_request("GET", "/tracking")
+    if "error" in tracking:
+        return tracking
+    return await stop_running(tracking, round_minutes)
+
+
+async def stop_running(tracking: dict[str, Any], round_minutes: int) -> dict[str, Any]:
+    """Stop the timer described by `tracking` (from GET /tracking), optionally rounding the entry."""
+    # EARLY answers a stop under one minute with 400 and also discards the
+    # timer (verified live), so check the age first and leave it running.
+    stopped_at = now_iso()
+    if (parse_iso(stopped_at) - parse_iso(tracking["startedAt"])).total_seconds() < 60:
+        return {"error": "Tracker is under 1 minute old; EARLY would discard it. Left running.", "tracking": tracking}
+    entry = await make_early_request("POST", "/tracking/stop", json_body={"stoppedAt": stopped_at})
+    if "error" in entry or not round_minutes:
+        return entry
+    rounded = await _round_entry(entry, round_minutes)
+    if "error" in rounded:
+        return {**rounded, "stopped_entry": entry, "note": "stopped, but rounding failed; entry kept exact times"}
+    return rounded
+
+
+async def _round_entry(entry: dict[str, Any], round_minutes: int) -> dict[str, Any]:
+    """Round a stopped entry, clamped so it never overlaps a neighbouring entry.
+
+    EARLY splits or removes entries that an edited one overlaps, and a neighbour
+    made in the app or stopped without rounding is off the grid.
+    """
+    exact = (parse_iso(entry["duration"]["startedAt"]), parse_iso(entry["duration"]["stoppedAt"]))
+    start, stop = rounded_span(*exact, round_minutes)
+    window = (min(start, exact[0]) - timedelta(hours=1), max(stop, exact[1]) + timedelta(hours=1))
+    nearby = await make_early_request(
+        "GET", f"/time-entries/{format_api_ts(window[0].replace(tzinfo=timezone.utc))}/{format_api_ts(window[1].replace(tzinfo=timezone.utc))}"
+    )
+    if "error" in nearby:
+        return nearby
+    others = [
+        (parse_iso(e["duration"]["startedAt"]), parse_iso(e["duration"]["stoppedAt"]))
+        for e in nearby.get("timeEntries", [])
+        if str(e.get("id")) != str(entry["id"])
+    ]
+    start, stop = clamp_span(start, stop, exact, others)
+    if (start, stop) == exact:
+        return entry
+    body = {"startedAt": format_api_ts(start.replace(tzinfo=timezone.utc)), "stoppedAt": format_api_ts(stop.replace(tzinfo=timezone.utc))}
+    return await make_early_request("PATCH", f"/time-entries/{_seg(str(entry['id']))}", json_body=body)
 
 
 @mcp.tool(annotations=DESTRUCTIVE)
@@ -460,6 +517,60 @@ async def billing_report(start_date: str, end_date: str, hourly_rate: float) -> 
         "total_cost": round(total * hourly_rate, 2),
         "entry_count": len(entries),
         "activities": activities,
+    }
+
+
+@mcp.tool(annotations=READ_ONLY)
+async def timesheet(
+    start_date: str,
+    end_date: str,
+    folder_id: str | None = None,
+    round_hours: float = 0.25,
+) -> dict[str, Any]:
+    """Roll time entries up into timesheet rows: one row per activity and note, hours per local day.
+
+    Entries crossing local midnight are split between the two days. Each day's
+    cell is rounded to the nearest round_hours after summing, so short entries
+    are not rounded away one by one.
+
+    Args:
+        start_date: Start date in YYYY-MM-DD format (local)
+        end_date: End date in YYYY-MM-DD format, inclusive (local)
+        folder_id: Only include activities in this folder (filter by folder, not by name)
+        round_hours: Cell granularity in hours (default 0.25; 0 keeps exact hours)
+    """
+    if round_hours < 0:
+        return {"error": "round_hours must be 0 or positive"}
+    entries, error = await fetch_entries(start_date, end_date)
+    if error:
+        return error
+
+    cells: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
+    for entry in entries:
+        activity = entry.get("activity", {})
+        if folder_id and str(activity.get("folderId")) != str(folder_id):
+            continue
+        note = (entry.get("note") or {}).get("text") or ""
+        row = f"{activity.get('name', 'Unknown')}: {note}" if note else activity.get("name", "Unknown")
+        for day, hours in local_day_hours(entry).items():
+            if start_date <= day.isoformat() <= end_date:
+                cells[row][day.isoformat()] += hours
+
+    def _round(h: float) -> float:
+        return round(round(h / round_hours) * round_hours, 2) if round_hours else round(h, 2)
+
+    rows = []
+    for row, days in sorted(cells.items()):
+        rounded = {day: r for day, h in sorted(days.items()) if (r := _round(h))}
+        if rounded:
+            rows.append({"row": row, "days": rounded, "total": round(sum(rounded.values()), 2)})
+    return {
+        "start_date": start_date,
+        "end_date": end_date,
+        "folder_id": folder_id,
+        "round_hours": round_hours,
+        "rows": rows,
+        "total_hours": round(sum(r["total"] for r in rows), 2),
     }
 
 

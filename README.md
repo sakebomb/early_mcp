@@ -24,7 +24,7 @@ An MCP (Model Context Protocol) server that integrates with the [EARLY](https://
 | `current_tracking` | Get the currently running timer |
 | `start_tracking` | Start tracking time for an activity |
 | `edit_tracking` | Change the running timer's activity, start time or note |
-| `stop_tracking` | Stop the current tracker, creating a time entry |
+| `stop_tracking` | Stop the current tracker, creating a time entry; `round_minutes` snaps it to e.g. quarter hours |
 | `cancel_tracking` | Discard the running timer without creating an entry |
 | `list_time_entries` | Query time entries within a date range |
 | `get_time_entry` | Get one time entry by ID |
@@ -34,6 +34,7 @@ An MCP (Model Context Protocol) server that integrates with the [EARLY](https://
 | `time_summary` | Aggregate hours by activity for a period |
 | `efficiency_report` | Analyze time distribution and detect untracked gaps |
 | `billing_report` | Calculate billable hours and cost by activity |
+| `timesheet` | Roll entries into "Activity: note" rows with rounded hours per local day, optionally for one folder |
 | `explore_api` | Make raw authenticated GET requests to any EARLY API endpoint (writes opt-in) |
 
 ## Setup
@@ -76,6 +77,19 @@ Every tool declares MCP annotations so clients can decide what to confirm. Tools
 
 The EARLY API stores timestamps in UTC without an offset. Tools take dates (`YYYY-MM-DD`) and naive timestamps as local time in `EARLY_TIMEZONE` and convert them to UTC, so a "day" means your local day. Timestamps with an explicit offset (`+01:00`, `Z`) are converted from that offset. Raw entries returned by `list_time_entries` keep EARLY's UTC timestamps; report tools group by local day.
 
+### Stopping a timer
+
+EARLY rejects a stop less than one minute after the start and discards the timer along with it, so `stop_tracking` checks the timer's age first and leaves a younger one running. With `round_minutes`, both ends of the entry are snapped to the nearest step (on the UTC grid) after the stop. A neighbouring entry off that grid, for example one made in the app, would then overlap and EARLY would split or remove it, so the rounded span is clamped to its neighbours, and it keeps its exact times if under a minute would remain.
+
+### Command line
+
+`early_cli.py` runs the same tools from a hook or timer, printing JSON:
+
+```bash
+uv run python early_cli.py stop --round 15 --folder <folder_id>   # only stops a timer in that folder
+uv run python early_cli.py timesheet 2026-10-17 2026-10-30 --folder <folder_id>
+```
+
 ### Claude Code
 
 Add this to your Claude Code MCP settings (`~/.claude/settings.json`):
@@ -100,6 +114,7 @@ Add this to your Claude Code MCP settings (`~/.claude/settings.json`):
 ```
 early.py          # MCP server with tool definitions
 early_client.py   # API client, auth, and utility functions
+early_cli.py      # Command-line entry for hooks and timers
 tests/            # pytest suite (mocked HTTP; run with `uv run pytest`)
 pyproject.toml    # Project config and dependencies
 ```
