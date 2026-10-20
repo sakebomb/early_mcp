@@ -226,6 +226,42 @@ def parse_iso(ts: str) -> datetime:
     return datetime.fromisoformat(ts)
 
 
+def round_to_minutes(dt: datetime, minutes: int) -> datetime:
+    """Round a datetime to the nearest multiple of `minutes` past the hour (halves round up).
+
+    Rounding is monotonic, so entries that did not overlap still do not after
+    their start and stop are both rounded.
+    """
+    step = timedelta(minutes=minutes)
+    floor = dt.replace(minute=0, second=0, microsecond=0)
+    floor += step * ((dt - floor) // step)
+    return floor + step if dt - floor >= step / 2 else floor
+
+
+def rounded_span(start: datetime, stop: datetime, minutes: int) -> tuple[datetime, datetime]:
+    """Round both ends of a span; a span that rounds to nothing keeps one step."""
+    rstart, rstop = round_to_minutes(start, minutes), round_to_minutes(stop, minutes)
+    if rstop <= rstart:
+        rstop = rstart + timedelta(minutes=minutes)
+    return rstart, rstop
+
+
+def local_day_hours(entry: dict[str, Any]) -> dict[date, float]:
+    """Split an entry's hours across the local calendar days it spans."""
+    start = utc_to_local(entry["duration"]["startedAt"])
+    stop = utc_to_local(entry["duration"]["stoppedAt"])
+    hours: dict[date, float] = {}
+    while start < stop:
+        day = start.date()
+        # Midnight from the naive date, so each day gets its own DST offset.
+        end = min(stop, local_to_utc(datetime.combine(day + timedelta(days=1), time())))
+        # Subtract in UTC: same-tzinfo subtraction is wall-clock and misses the DST hour.
+        elapsed = end.astimezone(timezone.utc) - start.astimezone(timezone.utc)
+        hours[day] = hours.get(day, 0.0) + elapsed.total_seconds() / 3600
+        start = utc_to_local(format_api_ts(end))
+    return hours
+
+
 def entry_hours(entry: dict[str, Any]) -> float:
     """Calculate hours for a single time entry."""
     d = entry.get("duration", {})
