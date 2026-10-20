@@ -14,15 +14,22 @@ An MCP (Model Context Protocol) server that integrates with the [EARLY](https://
 
 | Tool | Description |
 |------|-------------|
-| `list_activities` | List all activities with IDs, names, and colors |
+| `get_me` | Show the authenticated user's profile |
+| `list_tags_and_mentions` | List tags and mentions (IDs used in notes) |
+| `list_activities` | List active, inactive and archived activities |
 | `create_activity` | Create a new activity |
 | `update_activity` | Update an existing activity's name or color |
-| `delete_activity` | Archive/delete an activity |
+| `delete_activity` | Archive an activity (entries are kept) |
+| `unarchive_activity` | Restore an archived activity |
 | `current_tracking` | Get the currently running timer |
 | `start_tracking` | Start tracking time for an activity |
-| `stop_tracking` | Stop the current tracker |
+| `edit_tracking` | Change the running timer's activity, start time or note |
+| `stop_tracking` | Stop the current tracker, creating a time entry |
+| `cancel_tracking` | Discard the running timer without creating an entry |
 | `list_time_entries` | Query time entries within a date range |
+| `get_time_entry` | Get one time entry by ID |
 | `create_time_entry` | Create a manual time entry |
+| `edit_time_entry` | Change an entry's activity, times or note |
 | `delete_time_entry` | Delete a time entry |
 | `time_summary` | Aggregate hours by activity for a period |
 | `efficiency_report` | Analyze time distribution and detect untracked gaps |
@@ -60,6 +67,10 @@ Optional settings:
 |----------|---------|--------|
 | `EARLY_TIMEZONE` | system timezone | IANA zone (e.g. `America/New_York`) that dates and naive timestamps are read in |
 | `EARLY_EXPLORE_ALLOW_WRITES` | unset | Set to `1` to let `explore_api` send POST/PATCH/PUT/DELETE |
+
+### Tool hints
+
+Every tool declares MCP annotations so clients can decide what to confirm. Tools that can lose tracked time are marked destructive: deleting or editing an entry, cancelling a timer, and also creating an entry or stopping a timer, because EARLY splits or removes existing entries that a new one overlaps. `explore_api` is advertised read-only unless writes are enabled.
 
 ### Dates and timezones
 
