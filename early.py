@@ -21,6 +21,7 @@ from early_client import (
     fetch_entries,
     format_api_ts,
     local_day_hours,
+    overlapping_entries,
     parse_iso,
     entry_hours,
     rounded_span,
@@ -35,8 +36,9 @@ mcp = FastMCP("early")
 READ_ONLY = ToolAnnotations(readOnlyHint=True, openWorldHint=True)
 ADDITIVE = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=True)
 UPDATE = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=True)
-# Overwrites or removes tracked time. EARLY also splits or deletes existing
-# entries that a new or stopped entry overlaps, so those writes count too.
+# Overwrites or removes tracked time. create_time_entry and stop_tracking
+# refuse an overlap unless overwrite is set; with that flag EARLY splits or
+# deletes the entries the new span touches.
 DESTRUCTIVE = ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False, openWorldHint=True)
 
 
@@ -72,6 +74,16 @@ async def list_tags_and_mentions() -> dict[str, Any]:
 
 
 @mcp.tool(annotations=READ_ONLY)
+async def list_folders() -> dict[str, Any]:
+    """List every folder, including empty ones.
+
+    create_activity needs a folder id. list_activities only includes folders
+    that already hold an activity.
+    """
+    return await make_early_request("GET", "/folders")
+
+
+@mcp.tool(annotations=READ_ONLY)
 async def list_activities() -> dict[str, Any]:
     """List all activities in EARLY.
 
@@ -87,7 +99,7 @@ async def create_activity(name: str, folder_id: str, color: str = "#4CAF50") -> 
 
     Args:
         name: Name of the activity (e.g. "Deep Work", "Meetings")
-        folder_id: Folder to create it in (EARLY requires one); use a folderId from list_activities
+        folder_id: Folder to create it in (EARLY requires one); use an id from list_folders
         color: Hex color code for the activity (default: green)
     """
     return await make_early_request(
@@ -193,34 +205,69 @@ async def edit_tracking(
     return await make_early_request("PATCH", "/tracking", json_body=body)
 
 
+async def _refuse_overlap(started_at: str, stopped_at: str, overwrite: bool) -> dict[str, Any] | None:
+    """Return an error when the span overlaps existing entries and overwrite is false.
+
+    None means the write may proceed. Nothing is written here. A shared endpoint
+    is not an overlap. A lookup failure is returned as-is so the write does not proceed.
+    """
+    if overwrite:
+        return None
+    nearby = await make_early_request("GET", f"/time-entries/{started_at}/{stopped_at}")
+    if "error" in nearby:
+        return nearby
+    conflicts = overlapping_entries(nearby.get("timeEntries") or [], started_at, stopped_at)
+    if not conflicts:
+        return None
+    noun = "entry overlaps" if len(conflicts) == 1 else "entries overlap"
+    return {
+        "error": (
+            f"Refusing to write: {len(conflicts)} existing {noun} this span. "
+            "Pass overwrite=true to let EARLY split or delete them."
+        ),
+        "conflicts": conflicts,
+    }
+
+
 @mcp.tool(annotations=DESTRUCTIVE)
-async def stop_tracking(round_minutes: int = 0) -> dict[str, Any]:
+async def stop_tracking(round_minutes: int = 0, overwrite: bool = False) -> dict[str, Any]:
     """Stop the currently running tracker.
 
-    Returns the completed time entry with start/stop times and duration. The
-    entry must be at least 1 minute long; EARLY splits or removes existing
-    entries it overlaps.
+    Returns the completed time entry. The entry must be at least 1 minute long.
+    If the exact span overlaps existing entries, the timer is left running unless
+    overwrite is true; EARLY would otherwise split or delete them.
 
     Args:
         round_minutes: Snap the entry's start and stop to the nearest multiple of
             this many minutes (e.g. 15); 0 keeps exact times. A span that rounds
             to nothing keeps one step.
+        overwrite: Let EARLY split or delete entries this span overlaps.
     """
     if round_minutes < 0 or (round_minutes and 60 % round_minutes):
         return {"error": "round_minutes must be 0 or divide 60 (e.g. 5, 15, 30)"}
     tracking = await make_early_request("GET", "/tracking")
     if "error" in tracking:
         return tracking
-    return await stop_running(tracking, round_minutes)
+    return await stop_running(tracking, round_minutes, overwrite)
 
 
-async def stop_running(tracking: dict[str, Any], round_minutes: int) -> dict[str, Any]:
-    """Stop the timer described by `tracking` (from GET /tracking), optionally rounding the entry."""
+async def stop_running(
+    tracking: dict[str, Any], round_minutes: int, overwrite: bool = False
+) -> dict[str, Any]:
+    """Stop the timer described by `tracking` (from GET /tracking), optionally rounding the entry.
+
+    The overlap check uses the exact span EARLY would write. Rounding happens
+    only after that stop, and still clamps so the rounded span does not overlap.
+    """
     # EARLY answers a stop under one minute with 400 and also discards the
     # timer (verified live), so check the age first and leave it running.
     stopped_at = now_iso()
     if (parse_iso(stopped_at) - parse_iso(tracking["startedAt"])).total_seconds() < 60:
         return {"error": "Tracker is under 1 minute old; EARLY would discard it. Left running.", "tracking": tracking}
+    blocked = await _refuse_overlap(tracking["startedAt"], stopped_at, overwrite)
+    if blocked:
+        # The timer is still running: the stop is what would rewrite neighbours.
+        return {**blocked, "tracking": tracking}
     entry = await make_early_request("POST", "/tracking/stop", json_body={"stoppedAt": stopped_at})
     if "error" in entry or not round_minutes:
         return entry
@@ -298,25 +345,29 @@ async def create_time_entry(
     started_at: str,
     stopped_at: str,
     note: str | None = None,
+    overwrite: bool = False,
 ) -> dict[str, Any]:
     """Create a manual time entry (at least 1 minute long).
 
-    EARLY splits or removes existing entries that the new one overlaps.
+    Refuses when the span overlaps existing entries unless overwrite is true.
+    With that flag, EARLY splits or removes the entries it touches.
 
     Args:
         activity_id: ID of the activity
         started_at: Start time in ISO format; local time unless it has an offset (e.g. "2026-02-16T09:00:00")
         stopped_at: Stop time in ISO format; local time unless it has an offset (e.g. "2026-02-16T10:30:00")
         note: Optional note; tags/mentions use the syntax from list_tags_and_mentions
+        overwrite: Let EARLY split or delete entries this span overlaps.
     """
     try:
-        body: dict[str, Any] = {
-            "activityId": activity_id,
-            "startedAt": to_api_ts(started_at),
-            "stoppedAt": to_api_ts(stopped_at),
-        }
+        started = to_api_ts(started_at)
+        stopped = to_api_ts(stopped_at)
     except ValueError as e:
         return {"error": f"Invalid timestamp: {e}"}
+    blocked = await _refuse_overlap(started, stopped, overwrite)
+    if blocked:
+        return blocked
+    body: dict[str, Any] = {"activityId": activity_id, "startedAt": started, "stoppedAt": stopped}
     if note:
         body["note"] = _note(note)
     return await make_early_request("POST", "/time-entries", json_body=body)

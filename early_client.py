@@ -226,6 +226,28 @@ def parse_iso(ts: str) -> datetime:
     return datetime.fromisoformat(ts)
 
 
+def overlapping_entries(
+    entries: list[dict[str, Any]], started_at: str, stopped_at: str
+) -> list[dict[str, Any]]:
+    """Entries whose span overlaps [started_at, stopped_at). A shared endpoint does not.
+
+    An entry whose times cannot be read is included, so a write is not treated as clear.
+    """
+    start, stop = parse_iso(started_at), parse_iso(stopped_at)
+    conflicts = []
+    for entry in entries:
+        duration = entry.get("duration") if isinstance(entry, dict) else None
+        try:
+            other_start = parse_iso(duration["startedAt"])
+            other_stop = parse_iso(duration["stoppedAt"])
+            overlaps = start < other_stop and other_start < stop
+        except (TypeError, KeyError, ValueError):
+            overlaps = True
+        if overlaps:
+            conflicts.append(entry)
+    return conflicts
+
+
 def round_to_minutes(dt: datetime, minutes: int) -> datetime:
     """Round a datetime to the nearest multiple of `minutes` past the UTC hour (halves round up).
 

@@ -69,7 +69,9 @@ async def test_list_time_entries_sends_utc_bounds(api, new_york):
 @pytest.mark.anyio
 async def test_create_time_entry_converts_local_times_to_utc(api, new_york):
     await early.create_time_entry("7", "2026-02-16T09:00:00", "2026-02-16T10:30:00")
-    method, path, body = api.calls[0]
+    # The span is checked for overlaps before the write. This stub returns no entries.
+    assert api.calls[0][1] == "/time-entries/2026-02-16T14:00:00.000/2026-02-16T15:30:00.000"
+    method, path, body = api.calls[1]
     assert (method, path) == ("POST", "/time-entries")
     assert body["startedAt"] == "2026-02-16T14:00:00.000"
     assert body["stoppedAt"] == "2026-02-16T15:30:00.000"

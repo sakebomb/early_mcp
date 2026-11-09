@@ -75,9 +75,10 @@ def clock(monkeypatch):
 
 @pytest.mark.anyio
 async def test_stop_tracking_rounds_entry_to_quarter_hours(api, clock):
-    api.responses = [RUNNING, STOPPED, {"timeEntries": [STOPPED]}, {"id": "7"}]
+    # Empty overlap check, then the stop, then the rounding window.
+    api.responses = [RUNNING, {"timeEntries": []}, STOPPED, {"timeEntries": [STOPPED]}, {"id": "7"}]
     await early.stop_tracking(round_minutes=15)
-    assert api.calls[3] == (
+    assert api.calls[4] == (
         "PATCH",
         "/time-entries/7",
         {"startedAt": "2026-10-20T13:00:00.000", "stoppedAt": "2026-10-20T15:00:00.000"},
@@ -88,10 +89,11 @@ async def test_stop_tracking_rounds_entry_to_quarter_hours(api, clock):
 async def test_stop_tracking_rounding_never_overlaps_an_off_grid_neighbour(api, clock):
     # The previous entry (made in the app) ends at 13:04; rounding the start to 13:00
     # would overlap it and EARLY would split it, so the start stays at 13:04.
+    # It ends before the timer starts, so the pre-stop check must not refuse the stop.
     before = {**_entry("Meeting", "2026-10-20T12:30:00.000", "2026-10-20T13:04:00.000"), "id": "6"}
-    api.responses = [RUNNING, STOPPED, {"timeEntries": [before, STOPPED]}, {"id": "7"}]
+    api.responses = [RUNNING, {"timeEntries": [before]}, STOPPED, {"timeEntries": [before, STOPPED]}, {"id": "7"}]
     await early.stop_tracking(round_minutes=15)
-    assert api.calls[3][2] == {"startedAt": "2026-10-20T13:04:00.000", "stoppedAt": "2026-10-20T15:00:00.000"}
+    assert api.calls[4][2] == {"startedAt": "2026-10-20T13:04:00.000", "stoppedAt": "2026-10-20T15:00:00.000"}
 
 
 def test_clamp_span_keeps_exact_times_when_under_a_minute_remains():
@@ -104,9 +106,9 @@ def test_clamp_span_keeps_exact_times_when_under_a_minute_remains():
 
 @pytest.mark.anyio
 async def test_stop_tracking_without_rounding_does_not_patch(api, clock):
-    api.responses = [RUNNING, STOPPED]
+    api.responses = [RUNNING, {"timeEntries": []}, STOPPED]
     await early.stop_tracking()
-    assert [c[0] for c in api.calls] == ["GET", "POST"]
+    assert [c[0] for c in api.calls] == ["GET", "GET", "POST"]
 
 
 @pytest.mark.anyio
@@ -121,7 +123,7 @@ async def test_stop_tracking_leaves_timer_under_a_minute_running(api, clock):
 @pytest.mark.anyio
 async def test_stop_tracking_reports_failed_rounding_with_stopped_entry(api, clock):
     stopped = STOPPED
-    api.responses = [RUNNING, stopped, {"timeEntries": [stopped]}, {"error": "HTTP 400"}]
+    api.responses = [RUNNING, {"timeEntries": []}, stopped, {"timeEntries": [stopped]}, {"error": "HTTP 400"}]
     result = await early.stop_tracking(round_minutes=15)
     assert result["error"] == "HTTP 400"
     assert result["stopped_entry"] == stopped
