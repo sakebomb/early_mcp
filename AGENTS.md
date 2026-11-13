@@ -3,13 +3,15 @@
 early_mcp is an MCP server and CLI for the EARLY time tracker (Timeular v4 API). See its row in the
 [Component Map](https://github.com/sakebomb/homelab-blueprint/blob/main/Component%20Map.md).
 Tools, settings and CLI usage: [README.md](README.md).
+This file is a map, not the full story. Details live in the docs it names, so open the named doc
+before answering from the map.
 
 ## Where to look
 | You need | Look in |
 |---|---|
-| MCP tool definitions, overlap refusal | `early.py` |
-| API client, auth, date and timezone helpers | `early_client.py` |
-| CLI for hooks and timers | `early_cli.py` |
+| MCP tool definitions, overlap refusal | `early.py`; tool hints and stop-timer rules in `README.md` |
+| API client, auth, date and timezone helpers | `early_client.py`; dates and timezones in `README.md` |
+| CLI for hooks and timers | `early_cli.py`; usage in `README.md` ("Command line") |
 | Tests (mocked HTTP) | `tests/`; overlap rules in `tests/test_overlaps.py` |
 | Dependencies and pytest config | `pyproject.toml`, `uv.lock` |
 | PR review workflow | `.github/workflows/claude.yml` |
@@ -21,7 +23,8 @@ mock all HTTP and need no credentials:
 uv sync
 uv run pytest
 ```
-The server reads its credentials from the environment, by name only: `EARLY_API_KEY`,
+The server reads its credentials from the environment, set in the MCP client's `env` block
+(`README.md`, "Claude Code"; the code does not load a `.env` file), by name only: `EARLY_API_KEY`,
 `EARLY_API_SECRET`. Optional: `EARLY_BASE_URL`, `EARLY_TIMEZONE`, `EARLY_EXPLORE_ALLOW_WRITES`.
 
 ## Git
