@@ -13,8 +13,8 @@ def tools(monkeypatch):
         async def current_tracking():
             return tracking
 
-        async def stop_running(running, round_minutes):
-            calls.append((running, round_minutes))
+        async def stop_running(running, round_minutes, overwrite=False):
+            calls.append((running, round_minutes, overwrite))
             return {"id": "7"}
 
         monkeypatch.setattr(early, "current_tracking", current_tracking)
@@ -37,7 +37,7 @@ async def test_stop_rounds_the_timer_it_checked(tools):
     running = {"activity": {"folderId": 353867}, "startedAt": "2026-10-20T13:00:00.000"}
     calls = tools(running)  # an int folder id from EARLY still matches
     await early_cli.stop(15, "353867")
-    assert calls == [(running, 15)]
+    assert calls == [(running, 15, False)]
 
 
 @pytest.mark.anyio
@@ -53,3 +53,23 @@ async def test_stop_passes_auth_failures_through(tools):
     tools({"error": "Authentication failed: HTTP 401"})
     result = await early_cli.stop(15, "353867")
     assert "error" in result
+
+
+@pytest.mark.anyio
+async def test_stop_forwards_overwrite(tools):
+    running = {"activity": {"folderId": "1"}, "startedAt": "2026-10-20T13:00:00.000"}
+    calls = tools(running)
+    await early_cli.stop(0, None, True)
+    assert calls == [(running, 0, True)]
+
+
+def test_stop_cli_overwrite_flag(monkeypatch):
+    seen = {}
+
+    async def fake_stop(round_minutes, folder_id, overwrite=False):
+        seen["overwrite"] = overwrite
+        return {"stopped": True}
+
+    monkeypatch.setattr(early_cli, "stop", fake_stop)
+    assert early_cli.main(["stop", "--overwrite"]) == 0
+    assert seen["overwrite"] is True

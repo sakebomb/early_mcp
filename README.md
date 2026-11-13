@@ -16,19 +16,20 @@ An MCP (Model Context Protocol) server that integrates with the [EARLY](https://
 |------|-------------|
 | `get_me` | Show the authenticated user's profile |
 | `list_tags_and_mentions` | List tags and mentions (IDs used in notes) |
+| `list_folders` | List every folder, including empty ones |
 | `list_activities` | List active, inactive and archived activities |
-| `create_activity` | Create a new activity in a folder (folder ID required) |
+| `create_activity` | Create a new activity in a folder (folder id from `list_folders`) |
 | `update_activity` | Update an existing activity's name or color |
 | `delete_activity` | Archive an activity (entries are kept) |
 | `unarchive_activity` | Restore an archived activity |
 | `current_tracking` | Get the currently running timer |
 | `start_tracking` | Start tracking time for an activity |
 | `edit_tracking` | Change the running timer's activity, start time or note |
-| `stop_tracking` | Stop the current tracker, creating a time entry; `round_minutes` snaps it to e.g. quarter hours |
+| `stop_tracking` | Stop the current tracker. Refuses when the span overlaps existing entries unless `overwrite` is true; `round_minutes` snaps the entry to e.g. quarter hours |
 | `cancel_tracking` | Discard the running timer without creating an entry |
 | `list_time_entries` | Query time entries within a date range |
 | `get_time_entry` | Get one time entry by ID |
-| `create_time_entry` | Create a manual time entry |
+| `create_time_entry` | Create a manual time entry. Refuses when the span overlaps existing entries unless `overwrite` is true |
 | `edit_time_entry` | Change an entry's activity, times or note |
 | `delete_time_entry` | Delete a time entry |
 | `time_summary` | Aggregate hours by activity for a period |
@@ -71,7 +72,7 @@ Optional settings:
 
 ### Tool hints
 
-Every tool declares MCP annotations so clients can decide what to confirm. Tools that can lose tracked time are marked destructive: deleting or editing an entry, cancelling a timer, and also creating an entry or stopping a timer, because EARLY splits or removes existing entries that a new one overlaps. `explore_api` is advertised read-only unless writes are enabled.
+Every tool declares MCP annotations so clients can decide what to confirm. Tools that can lose tracked time are marked destructive: deleting or editing an entry, cancelling a timer, and creating an entry or stopping a timer. Those last two refuse a span that overlaps existing entries unless `overwrite` is set; with that flag EARLY splits or removes the entries it touches. `explore_api` is advertised read-only unless writes are enabled.
 
 ### Dates and timezones
 
@@ -79,7 +80,9 @@ The EARLY API stores timestamps in UTC without an offset. Tools take dates (`YYY
 
 ### Stopping a timer
 
-EARLY rejects a stop less than one minute after the start and discards the timer along with it, so `stop_tracking` checks the timer's age first and leaves a younger one running. With `round_minutes`, both ends of the entry are snapped to the nearest step (on the UTC grid) after the stop. A neighbouring entry off that grid, for example one made in the app, would then overlap and EARLY would split or remove it, so the rounded span is clamped to its neighbours, and it keeps its exact times if under a minute would remain.
+EARLY rejects a stop less than one minute after the start and discards the timer along with it, so `stop_tracking` checks the timer's age first and leaves a younger one running. It then checks the exact span (the timer's start through now) against existing entries. A shared endpoint is not an overlap. If anything overlaps and `overwrite` is not set, the timer is left running and the conflicting entries are returned. A failed lookup does not stop the timer. `overwrite` lets EARLY apply its own split-or-delete behavior.
+
+With `round_minutes`, both ends of the entry are snapped to the nearest step (on the UTC grid) after the stop. A neighbouring entry off that grid, for example one made in the app, would then overlap and EARLY would split or remove it, so the rounded span is clamped to its neighbours, and it keeps its exact times if under a minute would remain.
 
 ### Command line
 
@@ -87,8 +90,11 @@ EARLY rejects a stop less than one minute after the start and discards the timer
 
 ```bash
 uv run python early_cli.py stop --round 15 --folder <folder_id>   # only stops a timer in that folder
+uv run python early_cli.py stop --overwrite                       # allow EARLY to split overlapping entries
 uv run python early_cli.py timesheet 2026-10-17 2026-10-30 --folder <folder_id>
 ```
+
+Without `--overwrite`, a stop whose span overlaps an existing entry is refused and the timer keeps running.
 
 ### Claude Code
 

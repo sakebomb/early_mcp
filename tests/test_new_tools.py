@@ -24,11 +24,12 @@ def api(monkeypatch):
     [
         (lambda: early.get_me(), ("GET", "/me", None)),
         (lambda: early.list_tags_and_mentions(), ("GET", "/tags-and-mentions", None)),
+        (lambda: early.list_folders(), ("GET", "/folders", None)),
         (lambda: early.get_time_entry("9"), ("GET", "/time-entries/9", None)),
         (lambda: early.cancel_tracking(), ("DELETE", "/tracking", None)),
         (lambda: early.unarchive_activity("4"), ("POST", "/activities/4/unarchive", None)),
     ],
-    ids=["get_me", "tags", "get_time_entry", "cancel_tracking", "unarchive"],
+    ids=["get_me", "tags", "folders", "get_time_entry", "cancel_tracking", "unarchive"],
 )
 async def test_simple_tools_hit_documented_endpoints(api, call, expected):
     await call()
@@ -112,7 +113,7 @@ async def test_tools_that_can_lose_tracked_time_are_marked_destructive():
     for name in ("create_time_entry", "edit_time_entry", "delete_time_entry", "stop_tracking", "cancel_tracking"):
         assert hints[name].destructiveHint is True, name
     assert hints["start_tracking"].destructiveHint is False
-    for name in ("list_time_entries", "time_summary", "get_me"):
+    for name in ("list_time_entries", "time_summary", "get_me", "list_folders"):
         assert hints[name].readOnlyHint is True, name
 
 
